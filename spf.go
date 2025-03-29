@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
+	"log"
 
 	"github.com/miekg/dns"
 	"github.com/bradfitz/gomemcache/memcache"
@@ -73,11 +75,13 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
     var lastErr error
 
     // Use a custom dns.Client so we can manually handle UDP and TCP fallback
-    c := &dns.Client{Timeout: 0}
+    c := &dns.Client{Timeout: 5 * time.Second}
     // Alternatively, you could set c.Net = "udp" here, but we manage fallback below
 
     // Try each DNS server in turn
     for _, server := range r.servers {
+	log.Printf("Trying DNS server: %s", server)
+
         serverAddr := net.JoinHostPort(server, "53")
 
         // Build the query, enabling EDNS with a larger payload size
@@ -159,10 +163,15 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
         }
     }
 
-    if lastErr != nil {
-        return nil, lastErr
+    if lastErr == nil {
+        return []string{}, nil
     }
-    return txtRecords, nil
+
+    if errors.Is(lastErr, ErrNXDOMAIN) {
+        return nil, ErrNXDOMAIN
+    }
+
+    return nil, fmt.Errorf("all DNS servers failed: %w", lastErr)
 }
 
 // lookupA performs an A record lookup for a domain
@@ -191,6 +200,8 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
+		log.Printf("Trying DNS server: %s", server)
+
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
 		m.RecursionDesired = true
@@ -242,10 +253,15 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 		}
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return ipAddresses, nil
+    if lastErr == nil {
+        return []net.IP{}, nil
+    }
+
+    if errors.Is(lastErr, ErrNXDOMAIN) {
+        return nil, ErrNXDOMAIN
+    }
+
+    return nil, fmt.Errorf("all DNS servers failed: %w", lastErr)
 }
 
 // lookupMX performs an MX record lookup for a domain
@@ -285,6 +301,8 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
+		log.Printf("Trying DNS server: %s", server)
+
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeMX)
 		m.RecursionDesired = true
@@ -338,10 +356,22 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 		}
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
+	if len(mxRecords) > 0 {
+	    return mxRecords, nil
 	}
-	return mxRecords, nil
+
+	// No MX records found
+	if lastErr == nil {
+	    // Domain exists (e.g. SOA returned), but no MX records found – that's valid.
+	    return []*net.MX{}, nil
+	}
+
+	if errors.Is(lastErr, ErrNXDOMAIN) {
+	    return nil, ErrNXDOMAIN
+	}
+
+	// Other error (timeout, SERVFAIL, etc.)
+	return nil, fmt.Errorf("all DNS servers failed: %w", lastErr)
 }
 
 // getSPFRecord retrieves the SPF record for a domain
