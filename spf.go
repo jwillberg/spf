@@ -161,6 +161,11 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
             return txtRecords, nil
         }
+
+        // Valid NOERROR response, but no TXT records — treat as empty, not error
+        if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0 {
+            return []string{}, nil
+        }
     }
 
     if lastErr == nil {
