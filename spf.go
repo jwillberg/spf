@@ -42,42 +42,74 @@ func NewDNSResolver(servers []string) *DNSResolver {
 
 // lookupTXT performs a TXT record lookup for a domain
 func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
-	var txtRecords []string
-	var lastErr error
+    var txtRecords []string
+    var lastErr error
 
-	// Try each DNS server until we get a response
-	for _, server := range r.servers {
-		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(domain), dns.TypeTXT)
-		m.RecursionDesired = true
+    // Use a custom dns.Client so we can manually handle UDP and TCP fallback
+    c := &dns.Client{Timeout: 0}
+    // Alternatively, you could set c.Net = "udp" here, but we manage fallback below
 
-		serverAddr := net.JoinHostPort(server, "53")
-		resp, _, err := r.client.Exchange(m, serverAddr)
-		if err != nil {
-			lastErr = err
-			continue
-		}
+    // Try each DNS server in turn
+    for _, server := range r.servers {
+        serverAddr := net.JoinHostPort(server, "53")
 
-		if resp.Rcode != dns.RcodeSuccess {
-			lastErr = fmt.Errorf("DNS lookup failed with code: %d", resp.Rcode)
-			continue
-		}
+        // Build the query, enabling EDNS with a larger payload size
+        m := new(dns.Msg)
+        m.SetQuestion(dns.Fqdn(domain), dns.TypeTXT)
+        m.RecursionDesired = true
 
-		for _, ans := range resp.Answer {
-			if txt, ok := ans.(*dns.TXT); ok {
-				txtRecords = append(txtRecords, strings.Join(txt.Txt, ""))
-			}
-		}
+        // Enable EDNS0 to handle larger responses in UDP
+        // (e.g., up to 4096 bytes – adjust as needed)
+        m.SetEdns0(4096, true)
 
-		if len(txtRecords) > 0 {
-			return txtRecords, nil
-		}
-	}
+        // First, do a UDP query
+        resp, _, err := c.Exchange(m, serverAddr)
+        if err != nil {
+            lastErr = err
+            continue
+        }
 
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return txtRecords, nil
+        // If the response is truncated, retry over TCP
+        if resp.Truncated {
+            cTCP := &dns.Client{Net: "tcp"}
+            resp, _, err = cTCP.Exchange(m, serverAddr)
+            if err != nil {
+                lastErr = err
+                continue
+            }
+        }
+
+        // If we didn't get a successful return code, move on to the next server
+        if resp.Rcode != dns.RcodeSuccess {
+            lastErr = fmt.Errorf("DNS lookup failed with code: %d", resp.Rcode)
+            continue
+        }
+
+        // Parse the TXT answers
+        var foundAny bool
+        for _, ans := range resp.Answer {
+            if txt, ok := ans.(*dns.TXT); ok {
+                // Join all TXT chunks — mail.ru often returns multiple chunks
+                record := strings.Join(txt.Txt, "")
+                // If “v=spf1” is missing a space after the version, insert it
+                if strings.HasPrefix(record, "v=spf1") && len(record) > 6 && record[6] != ' ' {
+                    record = "v=spf1 " + record[6:]
+                }
+                txtRecords = append(txtRecords, record)
+                foundAny = true
+            }
+        }
+
+        // As soon as we find at least one TXT record, return
+        if foundAny {
+            return txtRecords, nil
+        }
+    }
+
+    if lastErr != nil {
+        return nil, lastErr
+    }
+    return txtRecords, nil
 }
 
 // lookupA performs an A record lookup for a domain
