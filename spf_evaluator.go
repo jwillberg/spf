@@ -39,10 +39,19 @@ func NewSPFEvaluator(resolver *DNSResolver) *SPFEvaluator {
 	}
 }
 
+// normalizeDomain converts the given domain string to lowercase, trims leading and trailing spaces,
+// and removes any trailing dot (e.g., "example.com."). This ensures a canonical form for domain
+// comparisons and lookups.
+func normalizeDomain(d string) string {
+    d = strings.ToLower(strings.TrimSpace(d))
+    d = strings.TrimSuffix(d, ".")
+    return d
+}
+
 // EvaluateSPF evaluates an SPF record for a given IP and domain
 func (e *SPFEvaluator) EvaluateSPF(ip net.IP, domain string, record *SPFRecord) (string, error) {
-	e.includeLookups = make(map[string]bool)
-	e.dnsLookups = 0
+	// Normalize domain before we do anything else
+	domain = normalizeDomain(domain)
 
 	debugf("%sChecking SPF for IP %s and domain %s", indent(e.depth), ip.String(), domain)
 	debugf("%s↳ SPF: %s", indent(e.depth+1), record.Raw)
@@ -66,24 +75,43 @@ func (e *SPFEvaluator) EvaluateSPF(ip net.IP, domain string, record *SPFRecord) 
 	}
 
 	if redirectDomain, ok := record.Modifiers["redirect"]; ok && redirectDomain != "" {
-		debugf("%s↳ redirect=%s", indent(e.depth+2), redirectDomain)
-		if e.dnsLookups+1 > e.maxDNSLookups {
-			return ResultPermError, fmt.Errorf("permerror: DNS lookup limit exceeded")
-		}
-		e.dnsLookups++
-		spfRecord, err := e.resolver.getSPFRecord(redirectDomain)
-		if err != nil {
-			return ResultTempError, fmt.Errorf("temperror: failed to fetch redirect SPF: %v", err)
-		}
-		parsedRecord, err := ParseSPFRecord(spfRecord)
-		if err != nil {
-			return ResultPermError, fmt.Errorf("permerror: failed to parse redirect SPF: %v", err)
-		}
-		e.depth++
-		res, err := e.EvaluateSPF(ip, redirectDomain, parsedRecord)
-		e.depth--
-		debugf("%s↳ Final result: %s", indent(e.depth+2), res)
-		return res, err
+	    // Normalize the redirect domain to avoid duplicates like "example.com." vs "example.com"
+	    redirectDomain = normalizeDomain(redirectDomain)
+
+	    // Check if we've already processed this domain (circular redirect)
+	    if e.includeLookups[redirectDomain] {
+	        return ResultPermError, fmt.Errorf("permerror: circular redirect detected: %s", redirectDomain)
+    	}
+	    // Mark the domain as seen
+	    e.includeLookups[redirectDomain] = true
+
+	    debugf("%s↳ redirect=%s", indent(e.depth+2), redirectDomain)
+
+	    // Enforce DNS lookup limit
+	    if e.dnsLookups+1 > e.maxDNSLookups {
+        	return ResultPermError, fmt.Errorf("permerror: DNS lookup limit exceeded")
+	    }
+	    e.dnsLookups++
+
+	    // Fetch the SPF record of the redirect domain
+	    spfRecord, err := e.resolver.getSPFRecord(redirectDomain)
+	    if err != nil {
+        	return ResultTempError, fmt.Errorf("temperror: failed to fetch redirect SPF: %v", err)
+	    }
+
+	    // Parse the fetched SPF record
+	    parsedRecord, err := ParseSPFRecord(spfRecord)
+	    if err != nil {
+	        return ResultPermError, fmt.Errorf("permerror: failed to parse redirect SPF: %v", err)
+	    }
+
+	    // Recursively evaluate the SPF record of the redirected domain
+	    e.depth++
+	    res, err := e.EvaluateSPF(ip, redirectDomain, parsedRecord)
+	    e.depth--
+
+	    debugf("%s↳ Final result: %s", indent(e.depth+2), res)
+	    return res, err
 	}
 
 	debugf("%s↳ Final result: neutral", indent(e.depth+1))
@@ -164,27 +192,44 @@ func (e *SPFEvaluator) evaluateMechanism(ip net.IP, domain string, mechanism Mec
 		}
 		return false, nil
 	case MechanismInclude:
-		if e.includeLookups[mechanism.Domain] {
-			return false, fmt.Errorf("circular include detected: %s", mechanism.Domain)
-		}
-		e.includeLookups[mechanism.Domain] = true
-		e.dnsLookups++
-		if e.dnsLookups > e.maxDNSLookups {
-			return false, fmt.Errorf("DNS lookup limit exceeded")
-		}
-		debugf("%s↳ include:%s", indent(e.depth+1), mechanism.Domain)
-		spfRecord, err := e.resolver.getSPFRecord(mechanism.Domain)
-		if err != nil {
-			return false, nil
-		}
-		parsedRecord, err := ParseSPFRecord(spfRecord)
-		if err != nil {
-			return false, err
-		}
-		e.depth++
-		result, err := e.EvaluateSPF(ip, mechanism.Domain, parsedRecord)
-		e.depth--
-		return result == ResultPass, err
+	    // First, normalize the domain in case it's written differently.
+	    includeDomain := normalizeDomain(mechanism.Domain)
+
+	    // Check if we've already included the same domain (circular reference).
+	    if e.includeLookups[includeDomain] {
+        	// Return an error here to break the loop.
+	        return false, fmt.Errorf("circular include detected: %s", includeDomain)
+	    }
+	    // Mark this domain as seen.
+	    e.includeLookups[includeDomain] = true
+
+	    // Increment DNS lookups count.
+	    e.dnsLookups++
+	    if e.dnsLookups > e.maxDNSLookups {
+        	return false, fmt.Errorf("DNS lookup limit exceeded")
+	    }
+
+	    debugf("%s↳ include:%s", indent(e.depth+1), includeDomain)
+
+	    // Retrieve the SPF record for the included domain.
+	    spfRecord, err := e.resolver.getSPFRecord(includeDomain)
+	    if err != nil {
+        	// If the record cannot be fetched, return false (or consider returning a temp error).
+	        return false, nil
+	    }
+
+	    parsedRecord, err := ParseSPFRecord(spfRecord)
+	    if err != nil {
+        	return false, err
+	    }
+
+	    // Re-enter EvaluateSPF to process the included domain's record.
+	    e.depth++
+	    result, err := e.EvaluateSPF(ip, includeDomain, parsedRecord)
+	    e.depth--
+
+	    // For an "include" mechanism, it's only a match if the sub-check result is "pass".
+	    return result == ResultPass, err
 	case MechanismExists:
 		e.dnsLookups++
 		if e.dnsLookups > e.maxDNSLookups {
