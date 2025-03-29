@@ -54,6 +54,24 @@ func ParseSPFRecord(record string) (*SPFRecord, error) {
 		return nil, fmt.Errorf("empty SPF record")
 	}
 
+	// Before splitting the SPF record into fields, we sanitize any extra spaces,
+	// for example converting "ip4: " to "ip4:", "ip6: " to "ip6:", etc.
+	replacements := []struct {
+	    old string
+	    new string
+	}{
+	    {"ip4: ", "ip4:"},
+	    {"ip6: ", "ip6:"},
+	    {"a: ", "a:"},
+	    {"mx: ", "mx:"},
+	    {"ptr: ", "ptr:"},
+	    {"exists: ", "exists:"},
+	    {"include: ", "include:"},
+	}
+	for _, r := range replacements {
+	    record = strings.ReplaceAll(record, r.old, r.new)
+	}
+
 	// Check if the record starts with "v=spf1"
 	if !strings.HasPrefix(record, "v=spf1") {
 		return nil, fmt.Errorf("invalid SPF record: does not start with v=spf1")
@@ -114,30 +132,30 @@ func parseMechanism(term string) (*Mechanism, error) {
 		mechanism.Type = MechanismAll
 	} else if strings.HasPrefix(term, "include:") {
 		mechanism.Type = MechanismInclude
-		mechanism.Domain = term[8:]
+		mechanism.Domain = strings.TrimSpace(term[8:])
 	} else if strings.HasPrefix(term, "a") {
 		mechanism.Type = MechanismA
 		// Check if there's a domain specified
 		if strings.HasPrefix(term, "a:") {
-			domainAndPrefix := term[2:]
+			domainAndPrefix := strings.TrimSpace(term[2:])
 			mechanism.Domain, mechanism.Prefix = parseDomainAndPrefix(domainAndPrefix)
 		}
 	} else if strings.HasPrefix(term, "mx") {
 		mechanism.Type = MechanismMX
 		// Check if there's a domain specified
 		if strings.HasPrefix(term, "mx:") {
-			domainAndPrefix := term[3:]
+			domainAndPrefix := strings.TrimSpace(term[3:])
 			mechanism.Domain, mechanism.Prefix = parseDomainAndPrefix(domainAndPrefix)
 		}
 	} else if strings.HasPrefix(term, "ptr") {
 		mechanism.Type = MechanismPTR
 		// Check if there's a domain specified
 		if strings.HasPrefix(term, "ptr:") {
-			mechanism.Domain = term[4:]
+			mechanism.Domain = strings.TrimSpace(term[4:])
 		}
 	} else if strings.HasPrefix(term, "ip4:") {
 		mechanism.Type = MechanismIP4
-		ipAndPrefix := term[4:]
+		ipAndPrefix := strings.TrimSpace(term[4:])
 		ip, ipNet, prefix, err := parseIP4AndPrefix(ipAndPrefix)
 		if err != nil {
 			return nil, err
@@ -147,7 +165,7 @@ func parseMechanism(term string) (*Mechanism, error) {
 		mechanism.Prefix = prefix
 	} else if strings.HasPrefix(term, "ip6:") {
 		mechanism.Type = MechanismIP6
-		ipAndPrefix := term[4:]
+		ipAndPrefix := strings.TrimSpace(term[4:])
 		ip, ipNet, prefix, err := parseIP6AndPrefix(ipAndPrefix)
 		if err != nil {
 			return nil, err
@@ -157,7 +175,7 @@ func parseMechanism(term string) (*Mechanism, error) {
 		mechanism.Prefix = prefix
 	} else if strings.HasPrefix(term, "exists:") {
 		mechanism.Type = MechanismExists
-		mechanism.Domain = term[7:]
+		mechanism.Domain = strings.TrimSpace(term[7:])
 	} else {
 		return nil, fmt.Errorf("unknown mechanism: %s", term)
 	}
