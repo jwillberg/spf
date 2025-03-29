@@ -44,6 +44,12 @@ func SPFCheck(ip string, domain string) (string, error) {
 		return ResultTempError, err
 	}
 
+	// If getSPFRecord returned an empty string, that also means "no record" (could be NXDOMAIN).
+    	//    => Return "none" to indicate there's no valid SPF.
+    	if spfRecord == "" {
+        	return ResultNone, nil
+    	}
+
 	// Parse the SPF record
 	parsedRecord, err := ParseSPFRecord(spfRecord)
 	if err != nil {

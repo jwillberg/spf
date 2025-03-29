@@ -12,6 +12,9 @@ import (
 // SPF DNS servers to use for lookups
 var spfDNSServers = []string{"8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"}
 
+// ErrNXDOMAIN is used to indicate that the domain does not exist (NXDOMAIN).
+var ErrNXDOMAIN = errors.New("nxdomain")
+
 // SPF result types as defined in RFC 7208
 const (
 	ResultNone      = "none"      // No SPF records found or no valid domain
@@ -79,8 +82,12 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
             }
         }
 
-        // If we didn't get a successful return code, move on to the next server
-        if resp.Rcode != dns.RcodeSuccess {
+        // If the response code is NXDOMAIN (NameError), assign ErrNXDOMAIN and continue.
+        if resp.Rcode == dns.RcodeNameError {
+            lastErr = ErrNXDOMAIN
+            continue
+        } else if resp.Rcode != dns.RcodeSuccess {
+            // For other non-success codes, set a generic error and continue to the next server.
             lastErr = fmt.Errorf("DNS lookup failed with code: %d", resp.Rcode)
             continue
         }
@@ -195,16 +202,26 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 
 // getSPFRecord retrieves the SPF record for a domain
 func (r *DNSResolver) getSPFRecord(domain string) (string, error) {
-	txtRecords, err := r.lookupTXT(domain)
-	if err != nil {
-		return "", err
-	}
+    // Fetch all TXT records for this domain.
+    txtRecords, err := r.lookupTXT(domain)
+    if err != nil {
+        // If the error is specifically NXDOMAIN, we treat it as "no domain => no SPF".
+        if errors.Is(err, ErrNXDOMAIN) {
+            // Return empty string and no error, so that upper layers interpret it as "none".
+            return "", nil
+        }
+        // Otherwise, return the encountered error.
+        return "", err
+    }
 
-	for _, record := range txtRecords {
-		if strings.HasPrefix(record, "v=spf1 ") || record == "v=spf1" {
-			return record, nil
-		}
-	}
+    // Iterate through the TXT records and look for one that starts with "v=spf1".
+    for _, record := range txtRecords {
+        if strings.HasPrefix(record, "v=spf1 ") || record == "v=spf1" {
+            // Found a valid SPF record.
+            return record, nil
+        }
+    }
 
-	return "", errors.New("no SPF record found")
+    // If no SPF string was found in the TXT records, return a "no SPF found" error.
+    return "", errors.New("no SPF record found")
 }
