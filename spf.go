@@ -17,6 +17,7 @@ var spfDNSServers = []string{"8.8.8.8", "1.1.1.1", "9.9.9.9", "208.67.222.222"}
 
 // ErrNXDOMAIN is used to indicate that the domain does not exist (NXDOMAIN).
 var ErrNXDOMAIN = errors.New("nxdomain")
+var errNoSPF = errors.New("no SPF record found") // <- tämä tänne!
 
 // SPF result types as defined in RFC 7208
 const (
@@ -379,6 +380,7 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 	return nil, fmt.Errorf("all DNS servers failed: %w", lastErr)
 }
 
+
 // getSPFRecord retrieves the SPF record for a domain
 func (r *DNSResolver) getSPFRecord(domain string) (string, error) {
     // Fetch all TXT records for this domain.
@@ -402,5 +404,5 @@ func (r *DNSResolver) getSPFRecord(domain string) (string, error) {
     }
 
     // If no SPF string was found in the TXT records, return a "no SPF found" error.
-    return "", errors.New("no SPF record found")
+    return "", errNoSPF
 }

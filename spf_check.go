@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"errors"
 )
 
 // SPFCheck validates if an IP address is authorized to send emails from a specific domain
@@ -37,9 +38,10 @@ func SPFCheck(ip string, domain string, memcacheAddr string) (string, error) {
 	spfRecord, err := resolver.getSPFRecord(domain)
 	if err != nil {
 		// If no SPF record is found, return "none"
-		if strings.Contains(err.Error(), "no SPF record found") {
-			return ResultNone, nil
+		if errors.Is(err, errNoSPF) {
+	 		return ResultNone, nil
 		}
+
 		// For other DNS errors, return "temperror"
 		return ResultTempError, err
 	}
