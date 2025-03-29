@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+	"github.com/bradfitz/gomemcache/memcache"
 )
 
 // SPF DNS servers to use for lookups
@@ -30,21 +31,44 @@ const (
 type DNSResolver struct {
 	servers []string
 	client  *dns.Client
+
+	// Optional Memcache client. If nil, no caching is used.
+	mc *memcache.Client
 }
 
 // NewDNSResolver creates a new DNS resolver with the specified servers
-func NewDNSResolver(servers []string) *DNSResolver {
+// If memcacheAddr is an empty string, no memcache usage
+func NewDNSResolver(servers []string, memcacheAddr string) *DNSResolver {
 	if len(servers) == 0 {
 		servers = spfDNSServers
 	}
-	return &DNSResolver{
+	res := &DNSResolver{
 		servers: servers,
 		client:  &dns.Client{},
 	}
+
+	// If memcacheAddr is not empty, create a memcache.Client
+	if memcacheAddr != "" {
+		res.mc = memcache.New(memcacheAddr) // e.g. "127.0.0.1:11211"
+	}
+
+	return res
 }
 
 // lookupTXT performs a TXT record lookup for a domain
 func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
+    // 1) If memcache is available, check if we have a cached value
+    if r.mc != nil {
+        cacheKey := "spf_txt_" + domain
+        if item, err := r.mc.Get(cacheKey); err == nil {
+            // We have a cached entry. Convert item.Value (e.g. CSV -> slice)
+            cachedStr := string(item.Value)
+            // Suppose we stored them joined by "|"
+            txtRecords := strings.Split(cachedStr, "|")
+            return txtRecords, nil
+        }
+    }
+
     var txtRecords []string
     var lastErr error
 
@@ -94,8 +118,13 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
         // Parse the TXT answers
         var foundAny bool
+        var storeTTL uint32 = 300 // default fallback if no answer
+
         for _, ans := range resp.Answer {
             if txt, ok := ans.(*dns.TXT); ok {
+                // Take the TTL from the first matching answer
+                storeTTL = ans.Header().Ttl
+
                 // Join all TXT chunks — mail.ru often returns multiple chunks
                 record := strings.Join(txt.Txt, "")
                 // If “v=spf1” is missing a space after the version, insert it
@@ -109,6 +138,23 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
         // As soon as we find at least one TXT record, return
         if foundAny {
+            // If memcache is available, store
+            if r.mc != nil {
+                cacheKey := "spf_txt_" + domain
+                // Join records with "|"
+                joined := strings.Join(txtRecords, "|")
+
+                // storeTTL is in seconds
+                // If storeTTL is very large, memcache supports up to ~30 days in seconds
+                // If bigger, must be a Unix timestamp, but let's assume it's small
+                item := &memcache.Item{
+                    Key:        cacheKey,
+                    Value:      []byte(joined),
+                    Expiration: int32(storeTTL),
+                }
+                _ = r.mc.Set(item) // ignore set error
+            }
+
             return txtRecords, nil
         }
     }
@@ -121,6 +167,26 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
 // lookupA performs an A record lookup for a domain
 func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
+    	// 1) If memcache is available, check if we have a cached value
+	if r.mc != nil {
+            cacheKey := "spf_a_" + domain
+            if item, err := r.mc.Get(cacheKey); err == nil {
+                // Convert the cached string -> slice of IP addresses
+                // Suppose we stored them comma-separated
+                cachedStr := string(item.Value)
+                if cachedStr == "" {
+                    // Means we had no IP addresses previously
+                    return []net.IP{}, nil
+                }
+                ipStrs := strings.Split(cachedStr, ",")
+                var ips []net.IP
+                for _, s := range ipStrs {
+                    ips = append(ips, net.ParseIP(s))
+                }
+                return ips, nil
+            }
+        }
+
 	var ipAddresses []net.IP
 	var lastErr error
 
@@ -141,14 +207,38 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 			continue
 		}
 
+                // We can store the minimal TTL from the A answers
+                var storeTTL uint32 = 300 // fallback
+
 		for _, ans := range resp.Answer {
 			if a, ok := ans.(*dns.A); ok {
 				ipAddresses = append(ipAddresses, a.A)
+           			if ans.Header().Ttl < storeTTL {
+		                    storeTTL = ans.Header().Ttl
+                		}
 			}
 		}
 
 		if len(ipAddresses) > 0 {
-			return ipAddresses, nil
+	            // Cache these IP addresses
+        	    if r.mc != nil {
+	                cacheKey := "spf_a_" + domain
+
+        	        // Combine addresses into a comma-separated string
+	                var ipStrs []string
+        	        for _, ip := range ipAddresses {
+                	    ipStrs = append(ipStrs, ip.String())
+	                }
+        	        joined := strings.Join(ipStrs, ",")
+
+	                item := &memcache.Item{
+        	            Key:        cacheKey,
+                	    Value:      []byte(joined),
+	                    Expiration: int32(storeTTL),
+        	        }
+                	_ = r.mc.Set(item)
+	            }
+		    return ipAddresses, nil
 		}
 	}
 
@@ -160,6 +250,37 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 
 // lookupMX performs an MX record lookup for a domain
 func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
+    	// 1) If memcache is available, check if we have a cached value
+	if r.mc != nil {
+            cacheKey := "spf_mx_" + domain
+	    if item, err := r.mc.Get(cacheKey); err == nil {
+        	// Convert the cached string -> slice of net.MX
+	        // Suppose we stored each MX as "pref:host" separated by "|"
+        	cachedStr := string(item.Value)
+	        if cachedStr == "" {
+        	    return []*net.MX{}, nil
+	        }
+        	parts := strings.Split(cachedStr, "|")
+	        var mxs []*net.MX
+        	for _, p := range parts {
+	            // e.g. "10:mail.google.com"
+        	    sub := strings.SplitN(p, ":", 2)
+	            if len(sub) == 2 {
+        	        // parse preference
+                        // sub[0] => preference, sub[1] => host
+	                // Example: sub[0] = "10", sub[1] = "mail.google.com"
+        	        var pref uint16 = 0
+	                fmt.Sscanf(sub[0], "%d", &pref)
+        	        mxs = append(mxs, &net.MX{
+                	        Host: sub[1],
+	                        Pref: pref,
+        	        })
+	            }
+        	 }
+	         return mxs, nil
+             }
+    	}
+
 	var mxRecords []*net.MX
 	var lastErr error
 
@@ -180,16 +301,39 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 			continue
 		}
 
+		// We'll determine TTL from the first MX record or pick a min
+	        var storeTTL uint32 = 300
 		for _, ans := range resp.Answer {
 			if mx, ok := ans.(*dns.MX); ok {
 				mxRecords = append(mxRecords, &net.MX{
 					Host: mx.Mx,
 					Pref: mx.Preference,
 				})
+				if ans.Header().Ttl < storeTTL {
+		                    storeTTL = ans.Header().Ttl
+                		}
 			}
 		}
 
 		if len(mxRecords) > 0 {
+	            	// Cache the MX records
+  	                if r.mc != nil {
+		                cacheKey := "spf_mx_" + domain
+	
+        		        // Each record as "pref:host", joined by "|"
+		                var parts []string
+                		for _, rec := range mxRecords {
+		                    parts = append(parts, fmt.Sprintf("%d:%s", rec.Pref, rec.Host))
+                		}
+		                joined := strings.Join(parts, "|")
+
+                		item := &memcache.Item{
+		                    Key:        cacheKey,
+                		    Value:      []byte(joined),
+		                    Expiration: int32(storeTTL),
+                		}
+		                _ = r.mc.Set(item)
+            		}
 			return mxRecords, nil
 		}
 	}

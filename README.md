@@ -10,6 +10,7 @@ This library provides SPF (Sender Policy Framework) validation functionality acc
 - Recursive resolution of `include:` directives
 - Support for `redirect` modifier
 - Multiple DNS server support for lookups
+- **Optional Memcache caching** for DNS responses (TXT, A, MX)
 - Proper handling of DNS lookup limits (max 10 lookups per check)
 - Debug mode for hierarchical mechanism evaluation output
 - Clear result codes as defined in RFC 7208
@@ -60,6 +61,17 @@ func main() {
         fmt.Println("Permanent error occurred during SPF check")
     }
 }
+```
+
+### Optional Memcache Caching
+This library can optionally cache DNS lookups (TXT, A, MX) in Memcache. If you provide a Memcache address when creating the DNSResolver, DNS responses are stored temporarily according to their DNS TTL. Subsequent queries for the same record(s) use cached data until the TTL expires.
+
+```go
+// Example: create a resolver with Memcache caching
+memcacheAddr := "127.0.0.1:11211" // or "" to disable caching
+resolver := spf.NewDNSResolver(spfDNSServers, memcacheAddr)
+
+// Then use the resolver in your SPFCheck or custom flow...
 ```
 
 ### Result Types

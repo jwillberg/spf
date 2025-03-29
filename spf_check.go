@@ -15,7 +15,7 @@ import (
 // - "softfail": IP is probably not authorized (weak policy)
 // - "temperror": Temporary error (DNS issues, etc.)
 // - "permerror": Permanent error (invalid SPF record, etc.)
-func SPFCheck(ip string, domain string) (string, error) {
+func SPFCheck(ip string, domain string, memcacheAddr string) (string, error) {
 	// Validate IP address
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -31,7 +31,7 @@ func SPFCheck(ip string, domain string) (string, error) {
 	domain = strings.TrimSuffix(domain, ".")
 
 	// Create DNS resolver with default servers
-	resolver := NewDNSResolver(spfDNSServers)
+	resolver := NewDNSResolver(spfDNSServers, memcacheAddr)
 
 	// Get SPF record for the domain
 	spfRecord, err := resolver.getSPFRecord(domain)
