@@ -33,7 +33,7 @@ func NewSPFEvaluator(resolver *DNSResolver) *SPFEvaluator {
 	return &SPFEvaluator{
 		resolver:       resolver,
 		includeLookups: make(map[string]bool),
-		maxDNSLookups:  10,
+		maxDNSLookups:  50,
 		dnsLookups:     0,
 		depth:          0,
 	}
@@ -197,16 +197,16 @@ func (e *SPFEvaluator) evaluateMechanism(ip net.IP, domain string, mechanism Mec
 
 	    // Check if we've already included the same domain (circular reference).
 	    if e.includeLookups[includeDomain] {
-        	// Return an error here to break the loop.
+        	// If we've seen this domain before, it's a circular include => permerror.
 	        return false, fmt.Errorf("circular include detected: %s", includeDomain)
 	    }
-	    // Mark this domain as seen.
+	    // Mark this domain as seen to avoid circular references.
 	    e.includeLookups[includeDomain] = true
 
-	    // Increment DNS lookups count.
+	    // Increment the DNS lookups count to avoid exceeding the limit.
 	    e.dnsLookups++
 	    if e.dnsLookups > e.maxDNSLookups {
-        	return false, fmt.Errorf("DNS lookup limit exceeded")
+	        return false, fmt.Errorf("DNS lookup limit exceeded")
 	    }
 
 	    debugf("%s↳ include:%s", indent(e.depth+1), includeDomain)
@@ -214,14 +214,26 @@ func (e *SPFEvaluator) evaluateMechanism(ip net.IP, domain string, mechanism Mec
 	    // Retrieve the SPF record for the included domain.
 	    spfRecord, err := e.resolver.getSPFRecord(includeDomain)
 	    if err != nil {
-        	// If the record cannot be fetched, return false (or consider returning a temp error).
-	        return false, nil
+        	// If we cannot fetch the record (NXDOMAIN, timeout, etc.),
+	        // the 'include' simply does NOT match (false, nil).
+        	return false, nil
 	    }
 
+	    // If getSPFRecord returns an empty string, there's no SPF for this domain.
+	    // The 'include' mechanism therefore does not match, but it's not an error.
+	    if spfRecord == "" {
+        	return false, nil
+	    }
+
+	    // Parse the retrieved SPF record. If parsing fails, decide whether to treat it
+	    // as permerror or just "not matched". The spec generally suggests permerror,
+	    // but many implementations simply ignore it.
 	    parsedRecord, err := ParseSPFRecord(spfRecord)
 	    if err != nil {
-        	return false, err
-	    }
+	        // Return false to indicate this mechanism did not match,
+        	// or you can interpret it as permerror.
+	        return false, err
+    	    }
 
 	    // Re-enter EvaluateSPF to process the included domain's record.
 	    e.depth++
