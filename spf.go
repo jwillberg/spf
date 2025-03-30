@@ -80,7 +80,7 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
     // Try each DNS server in turn
     for _, server := range r.servers {
-	debugf("Trying DNS server: %s", server)
+	//debugf("Trying DNS server: %s", server)
 
         serverAddr := net.JoinHostPort(server, "53")
 
@@ -205,7 +205,7 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
-		debugf("Trying DNS server: %s", server)
+		//debugf("Trying DNS server: %s", server)
 
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
@@ -306,7 +306,7 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
-		debugf("Trying DNS server: %s", server)
+		//debugf("Trying DNS server: %s", server)
 
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeMX)
