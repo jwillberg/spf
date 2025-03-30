@@ -6,7 +6,6 @@ import (
 	"net"
 	"strings"
 	"time"
-	"log"
 
 	"github.com/miekg/dns"
 	"github.com/bradfitz/gomemcache/memcache"
