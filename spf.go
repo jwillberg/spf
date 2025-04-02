@@ -131,6 +131,13 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
                 // Join all TXT chunks — mail.ru often returns multiple chunks
                 record := strings.Join(txt.Txt, "")
+
+		// 🧼 Clean string
+		record = strings.TrimSpace(record)
+		record = strings.Trim(record, "\"")
+		record = strings.TrimPrefix(record, "\\\"")
+		record = strings.TrimSuffix(record, "\\\"")
+
                 // If “v=spf1” is missing a space after the version, insert it
                 if strings.HasPrefix(record, "v=spf1") && len(record) > 6 && record[6] != ' ' {
                     record = "v=spf1 " + record[6:]
@@ -205,7 +212,7 @@ func (r *DNSResolver) lookupA(domain string) ([]net.IP, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
-		//debugf("Trying DNS server: %s", server)
+		debugf("Trying DNS server: %s", server)
 
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeA)
@@ -306,7 +313,7 @@ func (r *DNSResolver) lookupMX(domain string) ([]*net.MX, error) {
 	var lastErr error
 
 	for _, server := range r.servers {
-		//debugf("Trying DNS server: %s", server)
+		debugf("Trying DNS server: %s", server)
 
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), dns.TypeMX)
