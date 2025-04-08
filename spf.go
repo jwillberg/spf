@@ -73,6 +73,7 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
 
     var txtRecords []string
     var lastErr error
+    var sawNXDOMAIN bool
 
     // Use a custom dns.Client so we can manually handle UDP and TCP fallback
     c := &dns.Client{Timeout: 5 * time.Second}
@@ -81,7 +82,6 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
     // Try each DNS server in turn
     for _, server := range r.servers {
 	//debugf("Trying DNS server: %s", server)
-
         serverAddr := net.JoinHostPort(server, "53")
 
         // Build the query, enabling EDNS with a larger payload size
@@ -96,9 +96,11 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
         // First, do a UDP query
         resp, _, err := c.Exchange(m, serverAddr)
         if err != nil {
+       	    //debugf("UDP error from %s: %v", server, err)
             lastErr = err
             continue
         }
+	//debugf("UDP response from %s: Rcode=%d", server, resp.Rcode)
 
         // If the response is truncated, retry over TCP
         if resp.Truncated {
@@ -108,11 +110,19 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
                 lastErr = err
                 continue
             }
+      	    //debugf("TCP response from %s: Rcode=%d", server, resp.Rcode)
+        }
+
+	// Varmistetaan ettei resp ole nil
+        if resp == nil {
+            lastErr = fmt.Errorf("no response from DNS server: %s", server)
+            continue
         }
 
         // If the response code is NXDOMAIN (NameError), assign ErrNXDOMAIN and continue.
         if resp.Rcode == dns.RcodeNameError {
             lastErr = ErrNXDOMAIN
+            sawNXDOMAIN = true
             continue
         } else if resp.Rcode != dns.RcodeSuccess {
             // For other non-success codes, set a generic error and continue to the next server.
@@ -180,9 +190,22 @@ func (r *DNSResolver) lookupTXT(domain string) ([]string, error) {
     }
 
     if errors.Is(lastErr, ErrNXDOMAIN) {
+        //debugf("At least one DNS server returned NXDOMAIN → treating as 'none'")
         return nil, ErrNXDOMAIN
     }
 
+    if sawNXDOMAIN {
+        //debugf("At least one DNS server returned NXDOMAIN → treating as 'none'")
+        return nil, ErrNXDOMAIN
+    }
+
+    // Treat SERVFAIL (rcode 5) as temperror
+    if strings.Contains(lastErr.Error(), "code: 5") {
+        //debugf("At least one DNS server returned SERVFAIL → treating as temporary error")
+        return nil, fmt.Errorf("temporary DNS error: %w", lastErr)
+    }
+
+    //debugf("All DNS servers failed, last error: %v", lastErr)
     return nil, fmt.Errorf("all DNS servers failed: %w", lastErr)
 }
 
